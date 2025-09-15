@@ -1,0 +1,11 @@
+{
+	"id": "sync-server",
+	"name": "Sync Server",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "Synchronize your files with the self-hosted centralized service with API integration!",
+	"author": "Vitalii Moroz",
+	"authorUrl": "https://github.com/vitalikmorozz",
+	"fundingUrl": "https://obsidian.md/pricing",
+	"isDesktopOnly": false
+}

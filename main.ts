@@ -1,6 +1,13 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
-import * as fs from 'node:fs';
-import * as path from "node:path";
+import {
+	App,
+	Editor,
+	MarkdownView,
+	Notice,
+	Plugin,
+	PluginSettingTab,
+	Setting,
+} from "obsidian";
+import { Socket, io } from "socket.io-client";
 
 interface SyncServerSettings {
 	url: string;
@@ -12,7 +19,25 @@ const DEFAULT_SETTINGS: SyncServerSettings = {
 	url: "",
 	apiKey: "",
 	extensionsBlacklist: [],
-}
+};
+
+let socket: Socket;
+
+const connectSocket = (settings: SyncServerSettings) => {
+	if (socket?.connected) socket.disconnect();
+
+	socket = io(settings.url, {
+		// https://socket.io/docs/v4/client-options
+		reconnectionAttempts: 3,
+		reconnectionDelay: 5000,
+		reconnectionDelayMax: 30000,
+		retries: 3,
+		transports: ["websocket"],
+	});
+	socket.on("connect", () => {
+		new Notice("Connected to the server!");
+	});
+};
 
 export default class SyncServer extends Plugin {
 	settings: SyncServerSettings;
@@ -20,17 +45,7 @@ export default class SyncServer extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
+		connectSocket(this.settings);
 
 		this.addCommand({
 			id: "get-all-vault-files",
@@ -38,25 +53,53 @@ export default class SyncServer extends Plugin {
 			editorCallback: (editor: Editor, view: MarkdownView) => {
 				const files = this.app.vault.getFiles();
 				console.log(files);
-			}
-		})
+			},
+		});
 
 		this.app.vault.on("create", (file) => {
+			if (!socket.connected) return;
+
+			socket.emit("created-file", {
+				filename: file.name,
+				path: file.path,
+			});
+
 			console.log("New file created", file);
 		});
 
 		this.app.vault.on("delete", (file) => {
+			if (!socket.connected) return;
+
+			socket.emit("deleted-file", {
+				filename: file.name,
+				path: file.path,
+			});
+
 			console.log("File deleted", file);
 		});
 
 		this.app.vault.on("modify", async (file) => {
-			console.log("File modified", file);
+			if (!socket.connected) return;
+
 			const contents = await file.vault.adapter.read(file.path);
-			// const fullPath = path.join();
-			console.log(contents);
+
+			socket.emit("modified-file", {
+				filename: file.name,
+				path: file.path,
+				contents,
+			});
+
+			console.log("File modified", file);
 		});
 
 		this.app.vault.on("rename", (file) => {
+			if (!socket.connected) return;
+
+			socket.emit("renamed-file", {
+				filename: file.name,
+				path: file.path,
+			});
+
 			console.log("File renamed", file);
 		});
 
@@ -64,31 +107,19 @@ export default class SyncServer extends Plugin {
 	}
 
 	onunload() {
-
+		if (socket.connected) socket.disconnect();
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		this.settings = Object.assign(
+			{},
+			DEFAULT_SETTINGS,
+			await this.loadData()
+		);
 	}
 
 	async saveSettings() {
 		await this.saveData(this.settings);
-	}
-}
-
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
-
-	onOpen() {
-		const { contentEl } = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const { contentEl } = this;
-		contentEl.empty();
 	}
 }
 
@@ -106,11 +137,11 @@ class SyncServerSettingTab extends PluginSettingTab {
 		containerEl.empty();
 
 		new Setting(containerEl)
-			.setName('Server URL')
+			.setName("Server URL")
 			.setDesc("URL of your sync server")
 			.addText((text) =>
 				text
-					.setPlaceholder('https://localhost:3333')
+					.setPlaceholder("https://localhost:3333")
 					.setValue(this.plugin.settings.url)
 					.onChange(async (value) => {
 						// TODO: Validate
@@ -120,11 +151,11 @@ class SyncServerSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName('API Key')
+			.setName("API Key")
 			.setDesc("API Key to your sync server")
 			.addText((text) =>
 				text
-					.setPlaceholder('cw8m07g3h04cd4gcn4')
+					.setPlaceholder("cw8m07g3h04cd4gcn4")
 					.setValue(this.plugin.settings.apiKey)
 					.onChange(async (value) => {
 						// TODO: Validate
@@ -134,15 +165,29 @@ class SyncServerSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName('Extensions blacklist')
-			.setDesc("List of comma separated extensions to ignore while synchronizing")
+			.setName("Connect")
+			.setDesc("Connect to the server")
+			.addButton((button) =>
+				button.setButtonText("Connect").onClick(() => {
+					connectSocket(this.plugin.settings);
+				})
+			);
+
+		new Setting(containerEl)
+			.setName("Extensions blacklist")
+			.setDesc(
+				"List of comma separated extensions to ignore while synchronizing"
+			)
 			.addText((text) =>
 				text
-					.setPlaceholder('xls,word,csv,...')
-					.setValue(this.plugin.settings.extensionsBlacklist.join(","))
+					.setPlaceholder("xls,word,csv,...")
+					.setValue(
+						this.plugin.settings.extensionsBlacklist.join(",")
+					)
 					.onChange(async (value) => {
 						// TODO: Validate
-						this.plugin.settings.extensionsBlacklist = value.split(",");
+						this.plugin.settings.extensionsBlacklist =
+							value.split(",");
 						await this.plugin.saveSettings();
 					})
 			);

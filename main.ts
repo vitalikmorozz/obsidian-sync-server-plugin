@@ -1,11 +1,13 @@
 import {
 	App,
+	Modal,
 	Notice,
 	Plugin,
 	PluginSettingTab,
 	Setting,
 	TAbstractFile,
 	TFile,
+	TFolder,
 } from "obsidian";
 import { Socket, io } from "socket.io-client";
 
@@ -169,6 +171,55 @@ async function computeHash(content: string): Promise<string> {
 }
 
 // ============================================
+// Confirmation Modal
+// ============================================
+
+class ConfirmModal extends Modal {
+	message: string;
+	onResult: (confirmed: boolean) => void;
+
+	constructor(
+		app: App,
+		message: string,
+		onResult: (confirmed: boolean) => void,
+	) {
+		super(app);
+		this.message = message;
+		this.onResult = onResult;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.createEl("p", { text: this.message });
+
+		const buttonContainer = contentEl.createDiv({
+			cls: "modal-button-container",
+		});
+
+		buttonContainer
+			.createEl("button", { text: "Cancel" })
+			.addEventListener("click", () => {
+				this.onResult(false);
+				this.close();
+			});
+
+		const confirmBtn = buttonContainer.createEl("button", {
+			text: "Confirm",
+			cls: "mod-warning",
+		});
+		confirmBtn.addEventListener("click", () => {
+			this.onResult(true);
+			this.close();
+		});
+	}
+
+	onClose() {
+		const { contentEl } = this;
+		contentEl.empty();
+	}
+}
+
+// ============================================
 // Plugin
 // ============================================
 
@@ -218,6 +269,13 @@ export default class SyncServerPlugin extends Plugin {
 			id: "reconnect",
 			name: "Reconnect to server",
 			callback: () => this.connectSocket(),
+		});
+
+		// Add command to force push local state to server
+		this.addCommand({
+			id: "force-push-local",
+			name: "Force sync store state to local state",
+			callback: () => this.forceLocalToServer(),
 		});
 	}
 
@@ -678,6 +736,97 @@ export default class SyncServerPlugin extends Plugin {
 			}
 		} catch (err) {
 			console.error("[Sync] Failed to download:", path, err);
+		}
+	}
+
+	// ============================================
+	// Force push local to server
+	// ============================================
+
+	async confirmDestructiveAction(message: string): Promise<boolean> {
+		return new Promise((resolve) => {
+			const modal = new ConfirmModal(this.app, message, resolve);
+			modal.open();
+		});
+	}
+
+	async forceLocalToServer() {
+		// Check settings
+		if (!this.settings.url || !this.settings.apiKey) {
+			new Notice("Sync server URL and API key are required");
+			return;
+		}
+
+		// Confirmation dialog
+		const confirmed = await this.confirmDestructiveAction(
+			"This will DELETE all files on the server and replace them with your local files. This cannot be undone. Continue?",
+		);
+		if (!confirmed) return;
+
+		new Notice("Force syncing local state to server...");
+		console.log("[Sync] Starting force push to server...");
+
+		try {
+			// Step 1: Delete all files on server
+			const deleteResponse = await fetch(
+				`${this.settings.url}/api/v1/files/all`,
+				{
+					method: "DELETE",
+					headers: { "X-API-Key": this.settings.apiKey },
+				},
+			);
+
+			if (!deleteResponse.ok) {
+				throw new Error(
+					`Failed to clear server: ${deleteResponse.status}`,
+				);
+			}
+
+			const { deleted } = await deleteResponse.json();
+			console.log(`[Sync] Deleted ${deleted} files from server`);
+
+			// Step 2: Upload all local files
+			const localFiles = this.app.vault
+				.getFiles()
+				.filter((f) => !isBinaryFile(f.path));
+
+			let uploaded = 0;
+			for (const file of localFiles) {
+				try {
+					const content = await this.app.vault.read(file);
+					const response = await fetch(
+						`${this.settings.url}/api/v1/files`,
+						{
+							method: "PUT",
+							headers: {
+								"Content-Type": "application/json",
+								"X-API-Key": this.settings.apiKey,
+							},
+							body: JSON.stringify({ path: file.path, content }),
+						},
+					);
+
+					if (!response.ok) {
+						console.error(
+							`[Sync] Failed to upload ${file.path}: ${response.status}`,
+						);
+					} else {
+						uploaded++;
+					}
+				} catch (err) {
+					console.error(`[Sync] Failed to upload ${file.path}:`, err);
+				}
+			}
+
+			console.log(
+				`[Sync] Force push complete: ${uploaded} files uploaded`,
+			);
+			new Notice(
+				`Force sync complete: ${deleted} deleted, ${uploaded} uploaded`,
+			);
+		} catch (err) {
+			console.error("[Sync] Force push failed:", err);
+			new Notice("Force sync failed. Check console for details.");
 		}
 	}
 

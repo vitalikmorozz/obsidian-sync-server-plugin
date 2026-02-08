@@ -6,6 +6,7 @@ import {
 	Plugin,
 	PluginSettingTab,
 	Setting,
+	TFile,
 } from "obsidian";
 import { Socket, io } from "socket.io-client";
 
@@ -33,6 +34,9 @@ const connectSocket = (settings: SyncServerSettings) => {
 		reconnectionDelayMax: 30000,
 		retries: 3,
 		transports: ["websocket"],
+		query: {
+			apiKey: settings.apiKey,
+		},
 	});
 	socket.on("connect", () => {
 		new Notice("Connected to the server!");
@@ -56,22 +60,20 @@ export default class SyncServer extends Plugin {
 			},
 		});
 
+		// No point of creation of empty files, additionally, they all will have an incorrect name
 		this.app.vault.on("create", (file) => {
-			if (!socket.connected) return;
-
-			socket.emit("created-file", {
-				filename: file.name,
-				path: file.path,
-			});
-
-			console.log("New file created", file);
+			// if (!socket.connected) return;
+			// socket.emit("created-file", {
+			// 	filename: file.name,
+			// 	path: file.path,
+			// });
+			// console.log("New file created", file);
 		});
 
 		this.app.vault.on("delete", (file) => {
 			if (!socket.connected) return;
 
 			socket.emit("deleted-file", {
-				filename: file.name,
 				path: file.path,
 			});
 
@@ -81,26 +83,30 @@ export default class SyncServer extends Plugin {
 		this.app.vault.on("modify", async (file) => {
 			if (!socket.connected) return;
 
-			const contents = await file.vault.adapter.read(file.path);
+			const content = await file.vault.adapter.read(file.path);
 
 			socket.emit("modified-file", {
-				filename: file.name,
 				path: file.path,
-				contents,
+				content,
 			});
 
 			console.log("File modified", file);
 		});
 
-		this.app.vault.on("rename", (file) => {
+		this.app.vault.on("rename", (file, oldPath) => {
+			if (!(file instanceof TFile)) {
+				// Skip if folder
+				return;
+			}
+
 			if (!socket.connected) return;
 
 			socket.emit("renamed-file", {
-				filename: file.name,
-				path: file.path,
+				newPath: file.path,
+				oldPath,
 			});
 
-			console.log("File renamed", file);
+			console.log("File renamed", file, oldPath);
 		});
 
 		this.addSettingTab(new SyncServerSettingTab(this.app, this));
@@ -114,7 +120,7 @@ export default class SyncServer extends Plugin {
 		this.settings = Object.assign(
 			{},
 			DEFAULT_SETTINGS,
-			await this.loadData()
+			await this.loadData(),
 		);
 	}
 
@@ -147,7 +153,7 @@ class SyncServerSettingTab extends PluginSettingTab {
 						// TODO: Validate
 						this.plugin.settings.url = value;
 						await this.plugin.saveSettings();
-					})
+					}),
 			);
 
 		new Setting(containerEl)
@@ -161,7 +167,7 @@ class SyncServerSettingTab extends PluginSettingTab {
 						// TODO: Validate
 						this.plugin.settings.apiKey = value;
 						await this.plugin.saveSettings();
-					})
+					}),
 			);
 
 		new Setting(containerEl)
@@ -170,26 +176,26 @@ class SyncServerSettingTab extends PluginSettingTab {
 			.addButton((button) =>
 				button.setButtonText("Connect").onClick(() => {
 					connectSocket(this.plugin.settings);
-				})
+				}),
 			);
 
 		new Setting(containerEl)
 			.setName("Extensions blacklist")
 			.setDesc(
-				"List of comma separated extensions to ignore while synchronizing"
+				"List of comma separated extensions to ignore while synchronizing",
 			)
 			.addText((text) =>
 				text
 					.setPlaceholder("xls,word,csv,...")
 					.setValue(
-						this.plugin.settings.extensionsBlacklist.join(",")
+						this.plugin.settings.extensionsBlacklist.join(","),
 					)
 					.onChange(async (value) => {
 						// TODO: Validate
 						this.plugin.settings.extensionsBlacklist =
 							value.split(",");
 						await this.plugin.saveSettings();
-					})
+					}),
 			);
 	}
 }

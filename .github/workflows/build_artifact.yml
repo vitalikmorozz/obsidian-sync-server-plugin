@@ -1,0 +1,32 @@
+name: Build Obsidian plugin artifact
+
+on:
+    push:
+        tags:
+            - "*"
+    workflow_dispatch:
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Use Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: "18.x"
+
+            - name: Build plugin
+              run: |
+                  npm ci
+                  npm run build
+
+            - name: Upload artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: sync-server-plugin
+                  path: |
+                      main.js
+                      manifest.json
+                      styles.css

@@ -49,6 +49,7 @@ export interface FileListResponse {
 		size: number;
 		createdAt: string;
 		updatedAt: string;
+		expiresAt?: string; // Present when file is soft-deleted (tombstone)
 	}>;
 	total: number;
 	limit: number;

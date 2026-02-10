@@ -85,6 +85,12 @@ export default class SyncServerPlugin extends Plugin {
 			name: "Force sync store state to local state",
 			callback: () => this.forceLocalToServer(),
 		});
+
+		this.addCommand({
+			id: "disconnect",
+			name: "Disconnect from server",
+			callback: () => this.disconnectSocket(),
+		});
 	}
 
 	onunload() {
@@ -115,6 +121,16 @@ export default class SyncServerPlugin extends Plugin {
 
 	isPending(path: string): boolean {
 		return this.pendingPaths.has(path);
+	}
+
+	disconnectSocket() {
+		if (this.socket?.connected) {
+			this.socket.disconnect();
+			new Notice("Disconnected from sync server");
+			console.log("[Sync] Manually disconnected from server");
+		} else {
+			new Notice("Not connected to sync server");
+		}
 	}
 
 	connectSocket() {

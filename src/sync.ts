@@ -6,6 +6,7 @@ import type {
 	FileContentResponse,
 } from "./types";
 import { isBinaryFile, computeHash } from "./utils";
+import { mergeContents } from "./merge";
 
 export class SyncService {
 	private vault: Vault;
@@ -42,7 +43,15 @@ export class SyncService {
 
 		try {
 			const serverFiles = await this.fetchServerFiles();
-			console.log(`[Sync] Server has ${serverFiles.size} files`);
+			const activeCount = [...serverFiles.values()].filter(
+				(f) => !f.deleted,
+			).length;
+			const tombstoneCount = [...serverFiles.values()].filter(
+				(f) => f.deleted,
+			).length;
+			console.log(
+				`[Sync] Server has ${activeCount} active files, ${tombstoneCount} tombstones`,
+			);
 
 			const localFiles = this.vault
 				.getFiles()
@@ -51,33 +60,72 @@ export class SyncService {
 			console.log(`[Sync] Local vault has ${localFiles.length} files`);
 
 			let downloaded = 0;
-			let updated = 0;
+			let merged = 0;
+			let conflicts = 0;
 			let uploaded = 0;
+			let deleted = 0;
 
-			for (const [path] of serverFiles) {
-				if (!localPaths.has(path)) {
+			// Phase 1: Delete local files that are tombstoned on the server
+			for (const [path, info] of serverFiles) {
+				if (info.deleted && localPaths.has(path)) {
+					const file = this.vault.getAbstractFileByPath(path);
+					if (file instanceof TFile) {
+						try {
+							this.markPending(path);
+							await this.vault.delete(file);
+							console.log(
+								"[Sync] Deleted local file (server tombstone):",
+								path,
+							);
+							deleted++;
+						} catch (err) {
+							console.error(
+								"[Sync] Failed to delete:",
+								path,
+								err,
+							);
+						} finally {
+							this.clearPending(path);
+						}
+					}
+				}
+			}
+
+			// Phase 2: Download files that exist on server (active) but NOT locally
+			for (const [path, info] of serverFiles) {
+				if (!info.deleted && !localPaths.has(path)) {
 					await this.downloadFile(path);
 					downloaded++;
 				}
 			}
 
+			// Phase 3: For files that exist BOTH locally and on server (active), compare hashes
+			//          On mismatch, merge local and server content
 			for (const localFile of localFiles) {
 				const serverInfo = serverFiles.get(localFile.path);
-				if (serverInfo) {
+				if (serverInfo && !serverInfo.deleted) {
 					try {
-						const content = await this.vault.read(localFile);
-						const localHash = await computeHash(content);
+						const localContent = await this.vault.read(localFile);
+						const localHash = await computeHash(localContent);
 
 						if (localHash !== serverInfo.hash) {
 							console.log(
-								`[Sync] Hash mismatch for ${localFile.path}, downloading server version`,
+								`[Sync] Hash mismatch for ${localFile.path}, merging`,
 							);
-							await this.downloadFile(localFile.path);
-							updated++;
+							const mergeResult = await this.mergeFile(
+								localFile,
+								localContent,
+							);
+							if (mergeResult) {
+								merged++;
+								if (mergeResult.hasConflicts) {
+									conflicts += mergeResult.conflictCount;
+								}
+							}
 						}
 					} catch (err) {
 						console.error(
-							"[Sync] Failed to compare:",
+							"[Sync] Failed to merge:",
 							localFile.path,
 							err,
 						);
@@ -85,6 +133,8 @@ export class SyncService {
 				}
 			}
 
+			// Phase 4: Upload files that exist locally but NOT on server at all
+			//          (not even as a tombstone — truly unknown to the server)
 			for (const localFile of localFiles) {
 				if (!serverFiles.has(localFile.path)) {
 					try {
@@ -105,12 +155,21 @@ export class SyncService {
 				}
 			}
 
+			const conflictMsg =
+				conflicts > 0
+					? ` (${conflicts} conflict${conflicts > 1 ? "s" : ""} — search for <<<<<<< to resolve)`
+					: "";
 			console.log(
-				`[Sync] Downloaded ${downloaded}, updated ${updated}, uploaded ${uploaded}`,
+				`[Sync] Downloaded ${downloaded}, merged ${merged}, uploaded ${uploaded}, deleted ${deleted}, conflicts ${conflicts}`,
 			);
 			new Notice(
-				`Sync complete: ${downloaded} new, ${updated} updated, ${uploaded} uploaded`,
+				`Sync complete: ${downloaded} new, ${merged} merged, ${uploaded} uploaded, ${deleted} deleted${conflictMsg}`,
 			);
+			if (conflicts > 0) {
+				new Notice(
+					`${conflicts} merge conflict${conflicts > 1 ? "s" : ""} found. Search for <<<<<<< in your files to resolve.`,
+				);
+			}
 		} catch (err) {
 			console.error("[Sync] Initial sync failed:", err);
 			new Notice("Sync failed. Check console for details.");
@@ -220,14 +279,93 @@ export class SyncService {
 		}
 	}
 
-	private async fetchServerFiles(): Promise<Map<string, { hash: string }>> {
-		const serverFiles = new Map<string, { hash: string }>();
+	/**
+	 * Fetch a single file's content from the server.
+	 */
+	private async fetchFileContent(path: string): Promise<string | null> {
+		try {
+			const response = await fetch(
+				`${this.settings.url}/api/v1/files?path=${encodeURIComponent(path)}`,
+				{ headers: { "X-API-Key": this.settings.apiKey } },
+			);
+
+			if (!response.ok) {
+				console.error(
+					`[Sync] Failed to fetch server content for ${path}: ${response.status}`,
+				);
+				return null;
+			}
+
+			const data: FileContentResponse = await response.json();
+			return data.content;
+		} catch (err) {
+			console.error("[Sync] Failed to fetch server content:", path, err);
+			return null;
+		}
+	}
+
+	/**
+	 * Merge local and server content for a file with hash mismatch.
+	 * Writes merged result locally and uploads to server.
+	 */
+	private async mergeFile(
+		localFile: TFile,
+		localContent: string,
+	): Promise<{ hasConflicts: boolean; conflictCount: number } | null> {
+		const serverContent = await this.fetchFileContent(localFile.path);
+		if (serverContent === null) {
+			// Failed to fetch server content — fall back to downloading server version
+			console.log(
+				`[Sync] Could not fetch server content for merge, downloading: ${localFile.path}`,
+			);
+			await this.downloadFile(localFile.path);
+			return { hasConflicts: false, conflictCount: 0 };
+		}
+
+		const result = mergeContents(localContent, serverContent);
+
+		if (result.hasConflicts) {
+			console.log(
+				`[Sync] Merged ${localFile.path} with ${result.conflictCount} conflict(s)`,
+			);
+		} else {
+			console.log(`[Sync] Merged ${localFile.path} cleanly`);
+		}
+
+		// Write merged content locally
+		this.markPending(localFile.path);
+		try {
+			await this.vault.modify(localFile, result.content);
+		} finally {
+			this.clearPending(localFile.path);
+		}
+
+		// Upload merged content to server so both sides converge
+		this.socket?.emit(
+			"modified-file",
+			{ path: localFile.path, content: result.content },
+			() => {},
+		);
+
+		return {
+			hasConflicts: result.hasConflicts,
+			conflictCount: result.conflictCount,
+		};
+	}
+
+	private async fetchServerFiles(): Promise<
+		Map<string, { hash: string; deleted: boolean }>
+	> {
+		const serverFiles = new Map<
+			string,
+			{ hash: string; deleted: boolean }
+		>();
 		let offset = 0;
 		const limit = 1000;
 
 		while (true) {
 			const response = await fetch(
-				`${this.settings.url}/api/v1/files?limit=${limit}&offset=${offset}`,
+				`${this.settings.url}/api/v1/files?limit=${limit}&offset=${offset}&include_deleted=true`,
 				{ headers: { "X-API-Key": this.settings.apiKey } },
 			);
 
@@ -240,7 +378,10 @@ export class SyncService {
 			const data: FileListResponse = await response.json();
 			data.files.forEach((f) => {
 				if (!isBinaryFile(f.path)) {
-					serverFiles.set(f.path, { hash: f.hash });
+					serverFiles.set(f.path, {
+						hash: f.hash,
+						deleted: !!f.expiresAt,
+					});
 				}
 			});
 

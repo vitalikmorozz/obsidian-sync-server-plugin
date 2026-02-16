@@ -7,7 +7,7 @@ import type {
 	FileDeletedEvent,
 	FileRenamedEvent,
 } from "./types";
-import { isBinaryFile } from "./utils";
+import { isBinaryFile, encodeToBase64, decodeFromBase64 } from "./utils";
 
 export class EventHandlers {
 	private vault: Vault;
@@ -45,8 +45,6 @@ export class EventHandlers {
 	}
 
 	async handleServerFileCreated(event: FileCreatedEvent) {
-		if (isBinaryFile(event.path)) return;
-
 		console.log("[Sync] Server file created:", event.path);
 
 		this.markPending(event.path);
@@ -54,7 +52,12 @@ export class EventHandlers {
 			const existing = this.vault.getAbstractFileByPath(event.path);
 			if (!existing) {
 				await this.ensureParentFolder(event.path);
-				await this.vault.create(event.path, event.content);
+				if (event.isBinary) {
+					const buffer = decodeFromBase64(event.content);
+					await this.vault.createBinary(event.path, buffer);
+				} else {
+					await this.vault.create(event.path, event.content);
+				}
 				console.log("[Sync] Created local file:", event.path);
 			}
 		} catch (err) {
@@ -65,19 +68,27 @@ export class EventHandlers {
 	}
 
 	async handleServerFileModified(event: FileModifiedEvent) {
-		if (isBinaryFile(event.path)) return;
-
 		console.log("[Sync] Server file modified:", event.path);
 
 		this.markPending(event.path);
 		try {
 			const file = this.vault.getAbstractFileByPath(event.path);
 			if (file instanceof TFile) {
-				await this.vault.modify(file, event.content);
+				if (event.isBinary) {
+					const buffer = decodeFromBase64(event.content);
+					await this.vault.modifyBinary(file, buffer);
+				} else {
+					await this.vault.modify(file, event.content);
+				}
 				console.log("[Sync] Modified local file:", event.path);
 			} else if (!file) {
 				await this.ensureParentFolder(event.path);
-				await this.vault.create(event.path, event.content);
+				if (event.isBinary) {
+					const buffer = decodeFromBase64(event.content);
+					await this.vault.createBinary(event.path, buffer);
+				} else {
+					await this.vault.create(event.path, event.content);
+				}
 				console.log(
 					"[Sync] Created local file (from modify):",
 					event.path,
@@ -91,8 +102,6 @@ export class EventHandlers {
 	}
 
 	async handleServerFileDeleted(event: FileDeletedEvent) {
-		if (isBinaryFile(event.path)) return;
-
 		console.log("[Sync] Server file deleted:", event.path);
 
 		this.markPending(event.path);
@@ -110,8 +119,6 @@ export class EventHandlers {
 	}
 
 	async handleServerFileRenamed(event: FileRenamedEvent) {
-		if (isBinaryFile(event.oldPath) || isBinaryFile(event.newPath)) return;
-
 		console.log(
 			"[Sync] Server file renamed:",
 			event.oldPath,
@@ -134,7 +141,12 @@ export class EventHandlers {
 				);
 			} else if (!file) {
 				await this.ensureParentFolder(event.newPath);
-				await this.vault.create(event.newPath, event.content);
+				if (event.isBinary) {
+					const buffer = decodeFromBase64(event.content);
+					await this.vault.createBinary(event.newPath, buffer);
+				} else {
+					await this.vault.create(event.newPath, event.content);
+				}
 				console.log(
 					"[Sync] Created local file (from rename):",
 					event.newPath,
@@ -149,14 +161,21 @@ export class EventHandlers {
 	}
 
 	async handleLocalCreate(file: TAbstractFile) {
+		console.log("file");
 		if (!(file instanceof TFile)) return;
-		if (isBinaryFile(file.path)) return;
 		if (!this.socket?.connected) return;
 		if (this.isPending(file.path)) return;
 
 		setTimeout(async () => {
 			try {
-				const content = await this.vault.read(file);
+				let content: string;
+				console.log(file);
+				if (isBinaryFile(file.path)) {
+					const buffer = await this.vault.readBinary(file);
+					content = encodeToBase64(buffer);
+				} else {
+					content = await this.vault.read(file);
+				}
 				this.socket?.emit(
 					"modified-file",
 					{ path: file.path, content },
@@ -172,12 +191,17 @@ export class EventHandlers {
 
 	async handleLocalModify(file: TAbstractFile) {
 		if (!(file instanceof TFile)) return;
-		if (isBinaryFile(file.path)) return;
 		if (!this.socket?.connected) return;
 		if (this.isPending(file.path)) return;
 
 		try {
-			const content = await this.vault.read(file);
+			let content: string;
+			if (isBinaryFile(file.path)) {
+				const buffer = await this.vault.readBinary(file);
+				content = encodeToBase64(buffer);
+			} else {
+				content = await this.vault.read(file);
+			}
 			this.socket.emit(
 				"modified-file",
 				{ path: file.path, content },
@@ -191,7 +215,6 @@ export class EventHandlers {
 
 	handleLocalDelete(file: TAbstractFile) {
 		if (!(file instanceof TFile)) return;
-		if (isBinaryFile(file.path)) return;
 		if (!this.socket?.connected) return;
 		if (this.isPending(file.path)) return;
 
@@ -205,7 +228,6 @@ export class EventHandlers {
 
 	handleLocalRename(file: TAbstractFile, oldPath: string) {
 		if (!(file instanceof TFile)) return;
-		if (isBinaryFile(file.path) || isBinaryFile(oldPath)) return;
 		if (!this.socket?.connected) return;
 		if (this.isPending(file.path) || this.isPending(oldPath)) return;
 

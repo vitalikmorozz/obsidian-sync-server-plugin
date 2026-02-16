@@ -5,7 +5,12 @@ import type {
 	FileListResponse,
 	FileContentResponse,
 } from "./types";
-import { isBinaryFile, computeHash } from "./utils";
+import {
+	isBinaryFile,
+	computeHash,
+	encodeToBase64,
+	decodeFromBase64,
+} from "./utils";
 import { mergeContents } from "./merge";
 
 export class SyncService {
@@ -53,9 +58,8 @@ export class SyncService {
 				`[Sync] Server has ${activeCount} active files, ${tombstoneCount} tombstones`,
 			);
 
-			const localFiles = this.vault
-				.getFiles()
-				.filter((f) => !isBinaryFile(f.path));
+			// Include ALL files (no binary filtering)
+			const localFiles = this.vault.getFiles();
 			const localPaths = new Set(localFiles.map((f) => f.path));
 			console.log(`[Sync] Local vault has ${localFiles.length} files`);
 
@@ -94,32 +98,46 @@ export class SyncService {
 			// Phase 2: Download files that exist on server (active) but NOT locally
 			for (const [path, info] of serverFiles) {
 				if (!info.deleted && !localPaths.has(path)) {
-					await this.downloadFile(path);
+					await this.downloadFile(path, info.isBinary);
 					downloaded++;
 				}
 			}
 
 			// Phase 3: For files that exist BOTH locally and on server (active), compare hashes
-			//          On mismatch, merge local and server content
 			for (const localFile of localFiles) {
 				const serverInfo = serverFiles.get(localFile.path);
 				if (serverInfo && !serverInfo.deleted) {
 					try {
-						const localContent = await this.vault.read(localFile);
+						// Read content as appropriate type and compute hash on the stored representation
+						let localContent: string;
+						if (isBinaryFile(localFile.path)) {
+							const buffer =
+								await this.vault.readBinary(localFile);
+							localContent = encodeToBase64(buffer);
+						} else {
+							localContent = await this.vault.read(localFile);
+						}
 						const localHash = await computeHash(localContent);
 
 						if (localHash !== serverInfo.hash) {
 							console.log(
 								`[Sync] Hash mismatch for ${localFile.path}, merging`,
 							);
-							const mergeResult = await this.mergeFile(
-								localFile,
-								localContent,
-							);
-							if (mergeResult) {
+
+							if (isBinaryFile(localFile.path)) {
+								// Binary: server-wins strategy (no merge possible)
+								await this.downloadFile(localFile.path, true);
 								merged++;
-								if (mergeResult.hasConflicts) {
-									conflicts += mergeResult.conflictCount;
+							} else {
+								const mergeResult = await this.mergeFile(
+									localFile,
+									localContent,
+								);
+								if (mergeResult) {
+									merged++;
+									if (mergeResult.hasConflicts) {
+										conflicts += mergeResult.conflictCount;
+									}
 								}
 							}
 						}
@@ -134,11 +152,17 @@ export class SyncService {
 			}
 
 			// Phase 4: Upload files that exist locally but NOT on server at all
-			//          (not even as a tombstone — truly unknown to the server)
 			for (const localFile of localFiles) {
 				if (!serverFiles.has(localFile.path)) {
 					try {
-						const content = await this.vault.read(localFile);
+						let content: string;
+						if (isBinaryFile(localFile.path)) {
+							const buffer =
+								await this.vault.readBinary(localFile);
+							content = encodeToBase64(buffer);
+						} else {
+							content = await this.vault.read(localFile);
+						}
 						this.socket?.emit(
 							"modified-file",
 							{ path: localFile.path, content },
@@ -203,14 +227,19 @@ export class SyncService {
 			const { deleted } = await deleteResponse.json();
 			console.log(`[Sync] Deleted ${deleted} files from server`);
 
-			const localFiles = this.vault
-				.getFiles()
-				.filter((f) => !isBinaryFile(f.path));
+			// Include ALL files (no binary filtering)
+			const localFiles = this.vault.getFiles();
 
 			let uploaded = 0;
 			for (const file of localFiles) {
 				try {
-					const content = await this.vault.read(file);
+					let content: string;
+					if (isBinaryFile(file.path)) {
+						const buffer = await this.vault.readBinary(file);
+						content = encodeToBase64(buffer);
+					} else {
+						content = await this.vault.read(file);
+					}
 					const response = await fetch(
 						`${this.settings.url}/api/v1/files`,
 						{
@@ -247,7 +276,7 @@ export class SyncService {
 		}
 	}
 
-	async downloadFile(path: string) {
+	async downloadFile(path: string, binary?: boolean) {
 		try {
 			const response = await fetch(
 				`${this.settings.url}/api/v1/files?path=${encodeURIComponent(path)}`,
@@ -259,16 +288,27 @@ export class SyncService {
 			}
 
 			const data: FileContentResponse = await response.json();
+			const isBin = binary ?? data.isBinary;
 
 			this.markPending(path);
 			try {
 				const existing = this.vault.getAbstractFileByPath(path);
 				if (existing instanceof TFile) {
-					await this.vault.modify(existing, data.content);
+					if (isBin) {
+						const buffer = decodeFromBase64(data.content);
+						await this.vault.modifyBinary(existing, buffer);
+					} else {
+						await this.vault.modify(existing, data.content);
+					}
 					console.log("[Sync] Updated:", path);
 				} else {
 					await this.ensureParentFolder(path);
-					await this.vault.create(path, data.content);
+					if (isBin) {
+						const buffer = decodeFromBase64(data.content);
+						await this.vault.createBinary(path, buffer);
+					} else {
+						await this.vault.create(path, data.content);
+					}
 					console.log("[Sync] Downloaded:", path);
 				}
 			} finally {
@@ -305,7 +345,7 @@ export class SyncService {
 	}
 
 	/**
-	 * Merge local and server content for a file with hash mismatch.
+	 * Merge local and server content for a text file with hash mismatch.
 	 * Writes merged result locally and uploads to server.
 	 */
 	private async mergeFile(
@@ -318,7 +358,7 @@ export class SyncService {
 			console.log(
 				`[Sync] Could not fetch server content for merge, downloading: ${localFile.path}`,
 			);
-			await this.downloadFile(localFile.path);
+			await this.downloadFile(localFile.path, false);
 			return { hasConflicts: false, conflictCount: 0 };
 		}
 
@@ -354,11 +394,11 @@ export class SyncService {
 	}
 
 	private async fetchServerFiles(): Promise<
-		Map<string, { hash: string; deleted: boolean }>
+		Map<string, { hash: string; deleted: boolean; isBinary: boolean }>
 	> {
 		const serverFiles = new Map<
 			string,
-			{ hash: string; deleted: boolean }
+			{ hash: string; deleted: boolean; isBinary: boolean }
 		>();
 		let offset = 0;
 		const limit = 1000;
@@ -377,12 +417,12 @@ export class SyncService {
 
 			const data: FileListResponse = await response.json();
 			data.files.forEach((f) => {
-				if (!isBinaryFile(f.path)) {
-					serverFiles.set(f.path, {
-						hash: f.hash,
-						deleted: !!f.expiresAt,
-					});
-				}
+				// Include ALL files (no binary filtering)
+				serverFiles.set(f.path, {
+					hash: f.hash,
+					deleted: !!f.expiresAt,
+					isBinary: f.isBinary,
+				});
 			});
 
 			if (data.files.length < limit) break;

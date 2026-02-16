@@ -17,6 +17,8 @@ export interface FileCreatedEvent {
 	content: string;
 	hash: string;
 	size: number;
+	isBinary: boolean;
+	extension: string | null;
 	createdAt: string;
 }
 
@@ -25,6 +27,8 @@ export interface FileModifiedEvent {
 	content: string;
 	hash: string;
 	size: number;
+	isBinary: boolean;
+	extension: string | null;
 	updatedAt: string;
 }
 
@@ -39,6 +43,8 @@ export interface FileRenamedEvent {
 	content: string;
 	hash: string;
 	size: number;
+	isBinary: boolean;
+	extension: string | null;
 	updatedAt: string;
 }
 
@@ -47,6 +53,8 @@ export interface FileListResponse {
 		path: string;
 		hash: string;
 		size: number;
+		isBinary: boolean;
+		extension: string | null;
 		createdAt: string;
 		updatedAt: string;
 		expiresAt?: string; // Present when file is soft-deleted (tombstone)
@@ -61,6 +69,8 @@ export interface FileContentResponse {
 	content: string;
 	hash: string;
 	size: number;
+	isBinary: boolean;
+	extension: string | null;
 	createdAt: string;
 	updatedAt: string;
 }

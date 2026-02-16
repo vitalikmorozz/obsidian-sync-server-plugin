@@ -55,11 +55,19 @@ const BINARY_EXTENSIONS = new Set([
 	"sqlite3",
 ]);
 
+/**
+ * Check if a file path refers to a binary file (needs base64 encoding).
+ * Returns true if the file should be read/written as binary with base64 encoding.
+ */
 export function isBinaryFile(path: string): boolean {
 	const ext = path.split(".").pop()?.toLowerCase() ?? "";
 	return BINARY_EXTENSIONS.has(ext);
 }
 
+/**
+ * Compute SHA-256 hash of a string.
+ * Used for both text content and base64-encoded binary content.
+ */
 export async function computeHash(content: string): Promise<string> {
 	const encoder = new TextEncoder();
 	const data = encoder.encode(content);
@@ -67,4 +75,28 @@ export async function computeHash(content: string): Promise<string> {
 	const hashArray = Array.from(new Uint8Array(hashBuffer));
 	const hex = hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 	return `sha256:${hex}`;
+}
+
+/**
+ * Encode an ArrayBuffer to a base64 string.
+ */
+export function encodeToBase64(buffer: ArrayBuffer): string {
+	const bytes = new Uint8Array(buffer);
+	let binary = "";
+	for (let i = 0; i < bytes.byteLength; i++) {
+		binary += String.fromCharCode(bytes[i]);
+	}
+	return btoa(binary);
+}
+
+/**
+ * Decode a base64 string to an ArrayBuffer.
+ */
+export function decodeFromBase64(str: string): ArrayBuffer {
+	const binary = atob(str);
+	const bytes = new Uint8Array(binary.length);
+	for (let i = 0; i < binary.length; i++) {
+		bytes[i] = binary.charCodeAt(i);
+	}
+	return bytes.buffer;
 }

@@ -1,7 +1,7 @@
 {
-	"name": "obsidian-sample-plugin",
-	"version": "1.0.0",
-	"description": "This is a sample plugin for Obsidian (https://obsidian.md)",
+	"name": "obsidian-sync-server-plugin",
+	"version": "0.2.1",
+	"description": "Plugin for syncing files across multiple devices/vaults",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",

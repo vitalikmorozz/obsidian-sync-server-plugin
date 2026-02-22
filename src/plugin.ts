@@ -262,21 +262,28 @@ export default class SyncServerPlugin extends Plugin {
 		return this.settingsSyncService.pullSettings();
 	}
 
+	/**
+	 * Ensure all ancestor folders exist for a given file path.
+	 * Creates directories recursively from root to leaf.
+	 */
 	async ensureParentFolder(filePath: string) {
 		const parts = filePath.split("/");
-		parts.pop();
+		parts.pop(); // Remove the filename
 
 		if (parts.length === 0) return;
 
-		const folderPath = parts.join("/");
-		const existing = this.app.vault.getAbstractFileByPath(folderPath);
+		// Build each ancestor path from root to leaf
+		for (let i = 1; i <= parts.length; i++) {
+			const folderPath = parts.slice(0, i).join("/");
+			const existing = this.app.vault.getAbstractFileByPath(folderPath);
 
-		if (!existing) {
-			try {
-				await this.app.vault.createFolder(folderPath);
-			} catch (err) {
-				if (!String(err).includes("Folder already exists")) {
-					throw err;
+			if (!existing) {
+				try {
+					await this.app.vault.createFolder(folderPath);
+				} catch (err) {
+					if (!String(err).includes("Folder already exists")) {
+						throw err;
+					}
 				}
 			}
 		}

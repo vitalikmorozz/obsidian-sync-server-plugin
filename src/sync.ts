@@ -1,4 +1,4 @@
-import { Notice, TFile, Vault } from "obsidian";
+import { Notice, TFile, TFolder, Vault } from "obsidian";
 import type { Socket } from "socket.io-client";
 import type {
 	SyncServerSettings,
@@ -80,6 +80,7 @@ export class SyncService {
 								path,
 							);
 							deleted++;
+							await this.cleanupEmptyAncestors(path);
 						} catch (err) {
 							console.error(
 								"[Sync] Failed to delete:",
@@ -371,21 +372,60 @@ export class SyncService {
 		return serverFiles;
 	}
 
+	/**
+	 * Walk up the directory tree from a file path and delete any empty folders.
+	 * Stops at the vault root.
+	 */
+	private async cleanupEmptyAncestors(filePath: string) {
+		const parts = filePath.split("/");
+		parts.pop(); // Remove the filename
+
+		while (parts.length > 0) {
+			const folderPath = parts.join("/");
+			const folder = this.vault.getAbstractFileByPath(folderPath);
+
+			if (folder instanceof TFolder && folder.children.length === 0) {
+				try {
+					await this.vault.delete(folder);
+					console.log("[Sync] Deleted empty folder:", folderPath);
+				} catch (err) {
+					console.error(
+						"[Sync] Failed to delete empty folder:",
+						folderPath,
+						err,
+					);
+					break;
+				}
+			} else {
+				break;
+			}
+
+			parts.pop();
+		}
+	}
+
+	/**
+	 * Ensure all ancestor folders exist for a given file path.
+	 * Creates directories recursively from root to leaf.
+	 */
 	private async ensureParentFolder(filePath: string) {
 		const parts = filePath.split("/");
-		parts.pop();
+		parts.pop(); // Remove the filename
 
 		if (parts.length === 0) return;
 
-		const folderPath = parts.join("/");
-		const existing = this.vault.getAbstractFileByPath(folderPath);
+		// Build each ancestor path from root to leaf
+		for (let i = 1; i <= parts.length; i++) {
+			const folderPath = parts.slice(0, i).join("/");
+			const existing = this.vault.getAbstractFileByPath(folderPath);
 
-		if (!existing) {
-			try {
-				await this.vault.createFolder(folderPath);
-			} catch (err) {
-				if (!String(err).includes("Folder already exists")) {
-					throw err;
+			if (!existing) {
+				try {
+					await this.vault.createFolder(folderPath);
+				} catch (err) {
+					if (!String(err).includes("Folder already exists")) {
+						throw err;
+					}
 				}
 			}
 		}

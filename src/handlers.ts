@@ -1,4 +1,4 @@
-import { Notice, TFile, Vault, TAbstractFile } from "obsidian";
+import { Notice, TFile, TFolder, Vault, TAbstractFile } from "obsidian";
 import type { Socket } from "socket.io-client";
 import type {
 	AckResponse,
@@ -41,6 +41,38 @@ export class EventHandlers {
 		if (!response.success) {
 			new Notice(`Sync error: ${response.error.message}`);
 			console.error(`[Sync] ${action} failed:`, response.error);
+		}
+	}
+
+	/**
+	 * Walk up the directory tree from a file path and delete any empty folders.
+	 * Stops at the vault root.
+	 */
+	private async cleanupEmptyAncestors(filePath: string) {
+		const parts = filePath.split("/");
+		parts.pop(); // Remove the filename
+
+		while (parts.length > 0) {
+			const folderPath = parts.join("/");
+			const folder = this.vault.getAbstractFileByPath(folderPath);
+
+			if (folder instanceof TFolder && folder.children.length === 0) {
+				try {
+					await this.vault.delete(folder);
+					console.log("[Sync] Deleted empty folder:", folderPath);
+				} catch (err) {
+					console.error(
+						"[Sync] Failed to delete empty folder:",
+						folderPath,
+						err,
+					);
+					break;
+				}
+			} else {
+				break; // Folder not empty or doesn't exist, stop walking up
+			}
+
+			parts.pop();
 		}
 	}
 
@@ -110,6 +142,7 @@ export class EventHandlers {
 			if (file instanceof TFile) {
 				await this.vault.delete(file);
 				console.log("[Sync] Deleted local file:", event.path);
+				await this.cleanupEmptyAncestors(event.path);
 			}
 		} catch (err) {
 			console.error("[Sync] Failed to delete file:", event.path, err);
@@ -139,6 +172,7 @@ export class EventHandlers {
 					"->",
 					event.newPath,
 				);
+				await this.cleanupEmptyAncestors(event.oldPath);
 			} else if (!file) {
 				await this.ensureParentFolder(event.newPath);
 				if (event.isBinary) {

@@ -58,5 +58,30 @@ export class SyncServerSettingTab extends PluginSettingTab {
 					this.plugin.performInitialSync();
 				}),
 			);
+
+		// Vault Settings Sync section
+		containerEl.createEl("h2", { text: "Vault Settings Sync" });
+
+		new Setting(containerEl)
+			.setName("Push Settings")
+			.setDesc(
+				"Upload all .obsidian/ settings to the server (replaces server settings)",
+			)
+			.addButton((button) =>
+				button.setButtonText("Push").onClick(() => {
+					this.plugin.pushSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Pull Settings")
+			.setDesc(
+				"Download settings from the server to .obsidian/ (replaces local settings, restart required)",
+			)
+			.addButton((button) =>
+				button.setButtonText("Pull").onClick(() => {
+					this.plugin.pullSettings();
+				}),
+			);
 	}
 }

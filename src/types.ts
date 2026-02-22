@@ -74,3 +74,27 @@ export interface FileContentResponse {
 	createdAt: string;
 	updatedAt: string;
 }
+
+export interface SettingsListResponse {
+	settings: Array<{
+		path: string;
+		hash: string;
+		size: number;
+		isBinary: boolean;
+		extension: string | null;
+		createdAt: string;
+		updatedAt: string;
+	}>;
+	total: number;
+}
+
+export interface SettingsContentResponse {
+	path: string;
+	content: string;
+	hash: string;
+	size: number;
+	isBinary: boolean;
+	extension: string | null;
+	createdAt: string;
+	updatedAt: string;
+}

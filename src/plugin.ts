@@ -10,6 +10,7 @@ import type {
 import { DEFAULT_SETTINGS } from "./types";
 import { SyncServerSettingTab } from "./settings";
 import { SyncService } from "./sync";
+import { SettingsSyncService } from "./settingsSync";
 import { EventHandlers } from "./handlers";
 import { confirm } from "./modals";
 
@@ -19,6 +20,7 @@ export default class SyncServerPlugin extends Plugin {
 	pendingPaths: Set<string> = new Set();
 	private handlers: EventHandlers;
 	private syncService: SyncService;
+	private settingsSyncService: SettingsSyncService;
 
 	async onload() {
 		await this.loadSettings();
@@ -39,6 +41,11 @@ export default class SyncServerPlugin extends Plugin {
 			this.pendingPaths,
 			(path) => this.markPending(path),
 			(path) => this.clearPending(path),
+		);
+
+		this.settingsSyncService = new SettingsSyncService(
+			this.app.vault,
+			this.settings,
 		);
 
 		if (this.settings.url && this.settings.apiKey) {
@@ -90,6 +97,18 @@ export default class SyncServerPlugin extends Plugin {
 			id: "disconnect",
 			name: "Disconnect from server",
 			callback: () => this.disconnectSocket(),
+		});
+
+		this.addCommand({
+			id: "push-settings",
+			name: "Push vault settings to server",
+			callback: () => this.pushSettings(),
+		});
+
+		this.addCommand({
+			id: "pull-settings",
+			name: "Pull vault settings from server",
+			callback: () => this.pullSettings(),
 		});
 	}
 
@@ -213,6 +232,34 @@ export default class SyncServerPlugin extends Plugin {
 
 		this.updateSyncService();
 		return this.syncService.forceLocalToServer();
+	}
+
+	async pushSettings() {
+		const confirmed = await confirm(
+			this.app,
+			"This will replace all vault settings on the server with your local .obsidian/ settings. Continue?",
+		);
+		if (!confirmed) return;
+
+		this.settingsSyncService = new SettingsSyncService(
+			this.app.vault,
+			this.settings,
+		);
+		return this.settingsSyncService.pushSettings();
+	}
+
+	async pullSettings() {
+		const confirmed = await confirm(
+			this.app,
+			"This will replace your local .obsidian/ settings with settings from the server. You will need to restart Obsidian after this operation. Continue?",
+		);
+		if (!confirmed) return;
+
+		this.settingsSyncService = new SettingsSyncService(
+			this.app.vault,
+			this.settings,
+		);
+		return this.settingsSyncService.pullSettings();
 	}
 
 	async ensureParentFolder(filePath: string) {

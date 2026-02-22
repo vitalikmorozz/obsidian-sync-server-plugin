@@ -7,7 +7,12 @@ import type {
 	FileDeletedEvent,
 	FileRenamedEvent,
 } from "./types";
-import { isBinaryFile, encodeToBase64, decodeFromBase64 } from "./utils";
+import {
+	isBinaryFile,
+	encodeToBase64,
+	decodeFromBase64,
+	checkContentSize,
+} from "./utils";
 
 export class EventHandlers {
 	private vault: Vault;
@@ -195,7 +200,6 @@ export class EventHandlers {
 	}
 
 	async handleLocalCreate(file: TAbstractFile) {
-		console.log("file");
 		if (!(file instanceof TFile)) return;
 		if (!this.socket?.connected) return;
 		if (this.isPending(file.path)) return;
@@ -203,12 +207,17 @@ export class EventHandlers {
 		setTimeout(async () => {
 			try {
 				let content: string;
-				console.log(file);
 				if (isBinaryFile(file.path)) {
 					const buffer = await this.vault.readBinary(file);
 					content = encodeToBase64(buffer);
 				} else {
 					content = await this.vault.read(file);
+				}
+				const sizeError = checkContentSize(content, file.path);
+				if (sizeError) {
+					new Notice(`Sync skipped: ${sizeError}`);
+					console.warn("[Sync] Skipped create:", sizeError);
+					return;
 				}
 				this.socket?.emit(
 					"modified-file",
@@ -235,6 +244,12 @@ export class EventHandlers {
 				content = encodeToBase64(buffer);
 			} else {
 				content = await this.vault.read(file);
+			}
+			const sizeError = checkContentSize(content, file.path);
+			if (sizeError) {
+				new Notice(`Sync skipped: ${sizeError}`);
+				console.warn("[Sync] Skipped modify:", sizeError);
+				return;
 			}
 			this.socket.emit(
 				"modified-file",

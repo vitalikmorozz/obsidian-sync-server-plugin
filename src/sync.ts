@@ -10,6 +10,7 @@ import {
 	computeHash,
 	encodeToBase64,
 	decodeFromBase64,
+	checkContentSize,
 } from "./utils";
 
 export class SyncService {
@@ -66,6 +67,7 @@ export class SyncService {
 			let merged = 0;
 			let uploaded = 0;
 			let deleted = 0;
+			let skipped = 0;
 
 			// Phase 1: Delete local files that are tombstoned on the server
 			for (const [path, info] of serverFiles) {
@@ -127,17 +129,36 @@ export class SyncService {
 
 							if (localTime > serverTime) {
 								// Local is newer — upload to server
-								console.log(
-									`[Sync] Hash mismatch for ${localFile.path}, local is newer — uploading`,
+								const sizeError = checkContentSize(
+									localContent,
+									localFile.path,
 								);
-								this.socket?.emit(
-									"modified-file",
-									{
-										path: localFile.path,
-										content: localContent,
-									},
-									() => {},
-								);
+								if (sizeError) {
+									console.warn(
+										"[Sync] Skipped upload:",
+										sizeError,
+									);
+									skipped++;
+								} else {
+									console.log(
+										`[Sync] Hash mismatch for ${localFile.path}, local is newer — uploading`,
+									);
+									this.socket?.emit(
+										"modified-file",
+										{
+											path: localFile.path,
+											content: localContent,
+										},
+										(response: any) => {
+											if (response && !response.success) {
+												console.error(
+													`[Sync] Upload failed for ${localFile.path}:`,
+													response.error,
+												);
+											}
+										},
+									);
+								}
 							} else {
 								// Server is newer (or equal) — download from server
 								console.log(
@@ -172,10 +193,26 @@ export class SyncService {
 						} else {
 							content = await this.vault.read(localFile);
 						}
+						const sizeError = checkContentSize(
+							content,
+							localFile.path,
+						);
+						if (sizeError) {
+							console.warn("[Sync] Skipped upload:", sizeError);
+							skipped++;
+							continue;
+						}
 						this.socket?.emit(
 							"modified-file",
 							{ path: localFile.path, content },
-							() => {},
+							(response: any) => {
+								if (response && !response.success) {
+									console.error(
+										`[Sync] Upload failed for ${localFile.path}:`,
+										response.error,
+									);
+								}
+							},
 						);
 						uploaded++;
 					} catch (err) {
@@ -189,11 +226,18 @@ export class SyncService {
 			}
 
 			console.log(
-				`[Sync] Downloaded ${downloaded}, merged ${merged}, uploaded ${uploaded}, deleted ${deleted}`,
+				`[Sync] Downloaded ${downloaded}, merged ${merged}, uploaded ${uploaded}, deleted ${deleted}, skipped ${skipped}`,
 			);
-			new Notice(
-				`Sync complete: ${downloaded} new, ${merged} merged, ${uploaded} uploaded, ${deleted} deleted`,
-			);
+			const parts = [
+				`${downloaded} new`,
+				`${merged} merged`,
+				`${uploaded} uploaded`,
+				`${deleted} deleted`,
+			];
+			if (skipped > 0) {
+				parts.push(`${skipped} skipped (too large)`);
+			}
+			new Notice(`Sync complete: ${parts.join(", ")}`);
 		} catch (err) {
 			console.error("[Sync] Initial sync failed:", err);
 			new Notice("Sync failed. Check console for details.");
@@ -231,6 +275,7 @@ export class SyncService {
 			const localFiles = this.vault.getFiles();
 
 			let uploaded = 0;
+			let forceSkipped = 0;
 			for (const file of localFiles) {
 				try {
 					let content: string;
@@ -239,6 +284,12 @@ export class SyncService {
 						content = encodeToBase64(buffer);
 					} else {
 						content = await this.vault.read(file);
+					}
+					const sizeError = checkContentSize(content, file.path);
+					if (sizeError) {
+						console.warn("[Sync] Skipped upload:", sizeError);
+						forceSkipped++;
+						continue;
 					}
 					const response = await fetch(
 						`${this.settings.url}/api/v1/files`,
@@ -265,11 +316,13 @@ export class SyncService {
 			}
 
 			console.log(
-				`[Sync] Force push complete: ${uploaded} files uploaded`,
+				`[Sync] Force push complete: ${uploaded} uploaded, ${forceSkipped} skipped`,
 			);
-			new Notice(
-				`Force sync complete: ${deleted} deleted, ${uploaded} uploaded`,
-			);
+			let msg = `Force sync complete: ${deleted} deleted, ${uploaded} uploaded`;
+			if (forceSkipped > 0) {
+				msg += `, ${forceSkipped} skipped (too large)`;
+			}
+			new Notice(msg);
 		} catch (err) {
 			console.error("[Sync] Force push failed:", err);
 			new Notice("Force sync failed. Check console for details.");

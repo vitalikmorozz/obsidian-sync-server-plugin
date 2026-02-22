@@ -4,6 +4,7 @@ import type {
 	SettingsListResponse,
 	SettingsContentResponse,
 } from "./types";
+import { checkContentSize } from "./utils";
 
 /** Paths excluded from settings sync (relative to .obsidian/) */
 const EXCLUDED_PATHS = ["workspace.json", "workspace-mobile.json"];
@@ -144,8 +145,19 @@ export class SettingsSyncService {
 			// Collect and upload local settings
 			const localSettings = await this.collectLocalSettings();
 			let uploaded = 0;
+			let skipped = 0;
 
 			for (const setting of localSettings) {
+				const sizeError = checkContentSize(
+					setting.content,
+					setting.path,
+				);
+				if (sizeError) {
+					console.warn("[SettingsSync] Skipped:", sizeError);
+					skipped++;
+					continue;
+				}
+
 				try {
 					const response = await fetch(
 						`${this.settings.url}/api/v1/settings`,
@@ -178,11 +190,13 @@ export class SettingsSyncService {
 			}
 
 			console.log(
-				`[SettingsSync] Push complete: ${uploaded}/${localSettings.length} settings uploaded`,
+				`[SettingsSync] Push complete: ${uploaded}/${localSettings.length} uploaded, ${skipped} skipped`,
 			);
-			new Notice(
-				`Settings push complete: ${uploaded} files uploaded to server`,
-			);
+			let msg = `Settings push complete: ${uploaded} files uploaded to server`;
+			if (skipped > 0) {
+				msg += `, ${skipped} skipped (too large)`;
+			}
+			new Notice(msg);
 		} catch (err) {
 			console.error("[SettingsSync] Push failed:", err);
 			new Notice("Settings push failed. Check console for details.");

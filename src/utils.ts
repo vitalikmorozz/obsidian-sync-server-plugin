@@ -1,3 +1,19 @@
+/** Maximum content size in bytes (must match server Zod/Fastify/Socket.IO limits) */
+export const MAX_CONTENT_SIZE = 10 * 1024 * 1024; // 10 MB
+
+/**
+ * Check if content exceeds the upload size limit.
+ * Returns a human-readable size string if exceeded, or null if within limits.
+ */
+export function checkContentSize(content: string, path: string): string | null {
+	const size = new TextEncoder().encode(content).byteLength;
+	if (size > MAX_CONTENT_SIZE) {
+		const sizeMB = (size / (1024 * 1024)).toFixed(1);
+		return `${path} (${sizeMB} MB) exceeds the 10 MB upload limit`;
+	}
+	return null;
+}
+
 const BINARY_EXTENSIONS = new Set([
 	"png",
 	"jpg",

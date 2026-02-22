@@ -34,8 +34,9 @@ export class SettingsSyncService {
 	 * Exclusion rules:
 	 * 1. Specific paths (workspace.json, workspace-mobile.json)
 	 * 2. The sync-server plugin's own files
-	 * 3. Any path containing "node_modules" as a segment
-	 * 4. Plugin files: only main.js, manifest.json, styles.css, data.json are allowed
+	 * 3. Any path segment starting with "." (dotfiles like .DS_Store, .gitignore)
+	 * 4. Any path containing "node_modules" as a segment
+	 * 5. Plugin files: only main.js, manifest.json, styles.css, data.json are allowed
 	 */
 	private isExcluded(path: string): boolean {
 		if (EXCLUDED_PATHS.includes(path)) return true;
@@ -43,6 +44,9 @@ export class SettingsSyncService {
 			return true;
 
 		const segments = path.split("/");
+
+		// Block any path where a segment starts with "." (dotfiles/dotfolders)
+		if (segments.some((s) => s.startsWith("."))) return true;
 
 		// Block any path containing node_modules
 		if (segments.includes("node_modules")) return true;

@@ -1,16 +1,52 @@
-name: Build Obsidian plugin artifact
+name: Release Obsidian Plugin
 
 on:
     push:
         tags:
             - "*"
     workflow_dispatch:
+        inputs:
+            tag:
+                description: "Tag to release (e.g. v1.0.0)"
+                required: true
+                type: string
+
+permissions:
+    contents: write
 
 jobs:
-    build:
+    release:
         runs-on: ubuntu-latest
         steps:
+            - name: Determine tag
+              id: tag
+              run: |
+                  if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+                    echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+                  fi
+
             - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Generate changelog
+              id: changelog
+              run: |
+                  TAG="${{ steps.tag.outputs.tag }}"
+                  # Find the previous tag (the one before the current)
+                  PREV_TAG=$(git tag --sort=-creatordate | grep -v "^${TAG}$" | head -n 1)
+                  if [ -n "$PREV_TAG" ]; then
+                    echo "Generating changelog from ${PREV_TAG} to HEAD"
+                    LOG=$(git log "${PREV_TAG}..HEAD" --pretty=format:"- %s (%h)" --no-merges)
+                  else
+                    echo "No previous tag found, including all commits"
+                    LOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
+                  fi
+                  # Write to file to avoid escaping issues
+                  echo "$LOG" > changelog.txt
+                  echo "prev_tag=${PREV_TAG:-none}" >> "$GITHUB_OUTPUT"
 
             - name: Use Node.js
               uses: actions/setup-node@v4
@@ -22,11 +58,22 @@ jobs:
                   npm ci
                   npm run build
 
-            - name: Upload artifact
-              uses: actions/upload-artifact@v4
+            - name: Package release assets
+              run: |
+                  mkdir -p release
+                  cp main.js manifest.json styles.css release/
+                  cd release && zip -r ../sync-server-plugin.zip main.js manifest.json styles.css
+
+            - name: Create GitHub Release
+              uses: softprops/action-gh-release@v2
               with:
-                  name: sync-server-plugin
-                  path: |
-                      main.js
-                      manifest.json
-                      styles.css
+                  tag_name: ${{ steps.tag.outputs.tag }}
+                  name: ${{ steps.tag.outputs.tag }}
+                  body_path: changelog.txt
+                  draft: false
+                  prerelease: false
+                  files: |
+                      release/main.js
+                      release/manifest.json
+                      release/styles.css
+                      sync-server-plugin.zip

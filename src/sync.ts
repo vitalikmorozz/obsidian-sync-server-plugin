@@ -11,7 +11,6 @@ import {
 	encodeToBase64,
 	decodeFromBase64,
 } from "./utils";
-import { mergeContents } from "./merge";
 
 export class SyncService {
 	private vault: Vault;
@@ -65,7 +64,6 @@ export class SyncService {
 
 			let downloaded = 0;
 			let merged = 0;
-			let conflicts = 0;
 			let uploaded = 0;
 			let deleted = 0;
 
@@ -104,6 +102,7 @@ export class SyncService {
 			}
 
 			// Phase 3: For files that exist BOTH locally and on server (active), compare hashes
+			// Uses last-edit-wins: compare local mtime vs server updatedAt
 			for (const localFile of localFiles) {
 				const serverInfo = serverFiles.get(localFile.path);
 				if (serverInfo && !serverInfo.deleted) {
@@ -120,30 +119,39 @@ export class SyncService {
 						const localHash = await computeHash(localContent);
 
 						if (localHash !== serverInfo.hash) {
-							console.log(
-								`[Sync] Hash mismatch for ${localFile.path}, merging`,
-							);
+							const serverTime = new Date(
+								serverInfo.updatedAt,
+							).getTime();
+							const localTime = localFile.stat.mtime;
 
-							if (isBinaryFile(localFile.path)) {
-								// Binary: server-wins strategy (no merge possible)
-								await this.downloadFile(localFile.path, true);
-								merged++;
-							} else {
-								const mergeResult = await this.mergeFile(
-									localFile,
-									localContent,
+							if (localTime > serverTime) {
+								// Local is newer — upload to server
+								console.log(
+									`[Sync] Hash mismatch for ${localFile.path}, local is newer — uploading`,
 								);
-								if (mergeResult) {
-									merged++;
-									if (mergeResult.hasConflicts) {
-										conflicts += mergeResult.conflictCount;
-									}
-								}
+								this.socket?.emit(
+									"modified-file",
+									{
+										path: localFile.path,
+										content: localContent,
+									},
+									() => {},
+								);
+							} else {
+								// Server is newer (or equal) — download from server
+								console.log(
+									`[Sync] Hash mismatch for ${localFile.path}, server is newer — downloading`,
+								);
+								await this.downloadFile(
+									localFile.path,
+									isBinaryFile(localFile.path),
+								);
 							}
+							merged++;
 						}
 					} catch (err) {
 						console.error(
-							"[Sync] Failed to merge:",
+							"[Sync] Failed to resolve:",
 							localFile.path,
 							err,
 						);
@@ -179,21 +187,12 @@ export class SyncService {
 				}
 			}
 
-			const conflictMsg =
-				conflicts > 0
-					? ` (${conflicts} conflict${conflicts > 1 ? "s" : ""} — search for <<<<<<< to resolve)`
-					: "";
 			console.log(
-				`[Sync] Downloaded ${downloaded}, merged ${merged}, uploaded ${uploaded}, deleted ${deleted}, conflicts ${conflicts}`,
+				`[Sync] Downloaded ${downloaded}, merged ${merged}, uploaded ${uploaded}, deleted ${deleted}`,
 			);
 			new Notice(
-				`Sync complete: ${downloaded} new, ${merged} merged, ${uploaded} uploaded, ${deleted} deleted${conflictMsg}`,
+				`Sync complete: ${downloaded} new, ${merged} merged, ${uploaded} uploaded, ${deleted} deleted`,
 			);
-			if (conflicts > 0) {
-				new Notice(
-					`${conflicts} merge conflict${conflicts > 1 ? "s" : ""} found. Search for <<<<<<< in your files to resolve.`,
-				);
-			}
 		} catch (err) {
 			console.error("[Sync] Initial sync failed:", err);
 			new Notice("Sync failed. Check console for details.");
@@ -319,86 +318,25 @@ export class SyncService {
 		}
 	}
 
-	/**
-	 * Fetch a single file's content from the server.
-	 */
-	private async fetchFileContent(path: string): Promise<string | null> {
-		try {
-			const response = await fetch(
-				`${this.settings.url}/api/v1/files?path=${encodeURIComponent(path)}`,
-				{ headers: { "X-API-Key": this.settings.apiKey } },
-			);
-
-			if (!response.ok) {
-				console.error(
-					`[Sync] Failed to fetch server content for ${path}: ${response.status}`,
-				);
-				return null;
-			}
-
-			const data: FileContentResponse = await response.json();
-			return data.content;
-		} catch (err) {
-			console.error("[Sync] Failed to fetch server content:", path, err);
-			return null;
-		}
-	}
-
-	/**
-	 * Merge local and server content for a text file with hash mismatch.
-	 * Writes merged result locally and uploads to server.
-	 */
-	private async mergeFile(
-		localFile: TFile,
-		localContent: string,
-	): Promise<{ hasConflicts: boolean; conflictCount: number } | null> {
-		const serverContent = await this.fetchFileContent(localFile.path);
-		if (serverContent === null) {
-			// Failed to fetch server content — fall back to downloading server version
-			console.log(
-				`[Sync] Could not fetch server content for merge, downloading: ${localFile.path}`,
-			);
-			await this.downloadFile(localFile.path, false);
-			return { hasConflicts: false, conflictCount: 0 };
-		}
-
-		const result = mergeContents(localContent, serverContent);
-
-		if (result.hasConflicts) {
-			console.log(
-				`[Sync] Merged ${localFile.path} with ${result.conflictCount} conflict(s)`,
-			);
-		} else {
-			console.log(`[Sync] Merged ${localFile.path} cleanly`);
-		}
-
-		// Write merged content locally
-		this.markPending(localFile.path);
-		try {
-			await this.vault.modify(localFile, result.content);
-		} finally {
-			this.clearPending(localFile.path);
-		}
-
-		// Upload merged content to server so both sides converge
-		this.socket?.emit(
-			"modified-file",
-			{ path: localFile.path, content: result.content },
-			() => {},
-		);
-
-		return {
-			hasConflicts: result.hasConflicts,
-			conflictCount: result.conflictCount,
-		};
-	}
-
 	private async fetchServerFiles(): Promise<
-		Map<string, { hash: string; deleted: boolean; isBinary: boolean }>
+		Map<
+			string,
+			{
+				hash: string;
+				deleted: boolean;
+				isBinary: boolean;
+				updatedAt: string;
+			}
+		>
 	> {
 		const serverFiles = new Map<
 			string,
-			{ hash: string; deleted: boolean; isBinary: boolean }
+			{
+				hash: string;
+				deleted: boolean;
+				isBinary: boolean;
+				updatedAt: string;
+			}
 		>();
 		let offset = 0;
 		const limit = 1000;
@@ -422,6 +360,7 @@ export class SyncService {
 					hash: f.hash,
 					deleted: !!f.expiresAt,
 					isBinary: f.isBinary,
+					updatedAt: f.updatedAt,
 				});
 			});
 
